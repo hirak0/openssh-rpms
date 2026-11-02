@@ -1,0 +1,6 @@
+# 编译环境与中间产物
+output/
+dist/
+*.tar.gz
+repo/
+.git/

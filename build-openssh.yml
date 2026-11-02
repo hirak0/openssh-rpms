@@ -1,0 +1,141 @@
+# =============================================================
+# OpenSSH RPM GitHub Actions 编译
+# 放到仓库的 .github/workflows/build-openssh.yml
+#
+# 触发方式:
+#   1. 手动: Actions 页面 -> Build OpenSSH RPM -> Run workflow
+#      可选参数: ssh_version / ssl_version / os / arch
+#   2. 把 openssh-*.tar.gz 等源码包提交到仓库根目录后 push
+#
+# 产物: Actions 运行页面的 Artifacts 里下载
+#       openssh-<版本>-rpms-<标签>-<架构>.tar.gz
+# =============================================================
+name: Build OpenSSH RPM
+
+on:
+  workflow_dispatch:
+    inputs:
+      ssh_version:
+        description: "OpenSSH 版本（留空则用仓库里已有的 tar.gz，无 tar.gz 时自动下载此版本源码）"
+        required: false
+        default: "10.0p2"
+      ssl_version:
+        description: "OpenSSL 版本"
+        required: false
+        default: "3.3.1"
+      os:
+        description: "目标系统（BASE_IMAGE:OS_TAG）"
+        required: false
+        default: "centos:7:el7"
+        type: choice
+        options:
+          - "centos:7:el7"
+          - "quay.io/centos/centos:stream8:el8"
+          - "rockylinux:8:el8"
+          - "rockylinux:9:el9"
+          - "openeuler/openeuler:22.03-lts:oe22"
+          # 麒麟 V10: 需把基础镜像推到 GHCR/你的私有 registry 后填 <镜像>:ky10
+          # - "ghcr.io/<你的用户名>/kylin-v10-sp3:ky10"
+      arch:
+        description: "目标架构"
+        required: false
+        default: "x86_64"
+        type: choice
+        options:
+          - "x86_64"
+          - "aarch64"
+  push:
+    paths:
+      - "openssh-*.tar.gz"
+      - "openssl-*.tar.gz"
+      - ".github/workflows/build-openssh.yml"
+
+jobs:
+  build:
+    # aarch64: 用 GitHub 原生 ARM Runner（ubuntu-24.04-arm，真机，比 QEMU 快得多）
+    # 私有仓库若无 ARM Runner 权益，可把 runs-on 改回 ubuntu-latest，
+    # 走 QEMU 交叉编译（下方已有对应 PLAT 逻辑，无需其他改动）
+    runs-on: ${{ (github.event_name == 'workflow_dispatch' && inputs.arch == 'aarch64') && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    env:
+      OS_IMAGE: ${{ github.event_name == 'workflow_dispatch' && inputs.os && split(inputs.os, ':')[0] || 'centos' }}
+      OS_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.os && split(inputs.os, ':')[1] || '7' }}
+      OS_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.os && split(inputs.os, ':')[2] || 'el7' }}
+      TARGET_ARCH: ${{ github.event_name == 'workflow_dispatch' && inputs.arch || 'x86_64' }}
+      SSH_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.ssh_version || '' }}
+      SSL_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.ssl_version || '' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 私有仓库 / 或想手动指定平台时走 QEMU 路线
+      - name: Set up QEMU (arm64 cross-build on x86 runner)
+        if: env.TARGET_ARCH == 'aarch64' && runner.arch == 'X64'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      # ---- 源码包准备 ----
+      # 情况A: 仓库里已提交 tar.gz -> 直接用
+      # 情况B: 没有源码包 -> 用指定版本号从官方下载（注意 GitHub 直连 openssh 官方源较慢，用镜像）
+      - name: Download sources if missing
+        run: |
+          set -e
+          ls openssh-*.tar.gz openssl-*.tar.gz 2>/dev/null && exit 0
+          SSH_V="${SSH_VERSION}"; SSL_V="${SSL_VERSION}"
+          [ -z "$SSH_V" ] && { echo "无源码包且未指定 SSH 版本"; exit 1; }
+          [ -z "$SSL_V" ] && { echo "无源码包且未指定 SSL 版本"; exit 1; }
+          curl -fsSLO "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-${SSH_V}.tar.gz" \
+            || curl -fsSLO "https://mirrors.tuna.tsinghua.edu.cn/OpenBSD/OpenSSH/portable/openssh-${SSH_V}.tar.gz"
+          curl -fsSLO "https://github.com/openssl/openssl/releases/download/openssl-${SSL_V}/openssl-${SSL_V}.tar.gz" \
+            || curl -fsSLO "https://mirrors.tuna.tsinghua.edu.cn/openssl/source/openssl-${SSL_V}.tar.gz"
+          ls -lh *.tar.gz
+
+      # ---- 构建编译镜像 ----
+      # 假设仓库根目录有 Dockerfile（即本方案的 Dockerfile），
+      # build_openssh.sh 在仓库内任意位置均可（编译步骤会自动 find）
+      - name: Build builder image
+        run: |
+          set -e
+          BASE_IMAGE="${OS_IMAGE}:${OS_VERSION}"
+          PLAT=""
+          if [ "$TARGET_ARCH" = "aarch64" ] && [ "$RUNNER_ARCH" != "ARM64" ]; then
+            PLAT="--platform linux/arm64"
+          fi
+          docker build $PLAT --build-arg BASE_IMAGE="$BASE_IMAGE" \
+            -t openssh-builder:${OS_TAG}-${TARGET_ARCH} .
+
+      # ---- 编译 ----
+      - name: Build RPMs
+        run: |
+          set -e
+          PLAT=""
+          if [ "$TARGET_ARCH" = "aarch64" ] && [ "$RUNNER_ARCH" != "ARM64" ]; then
+            PLAT="--platform linux/arm64"
+          fi
+          mkdir -p output
+          docker run --rm -t $PLAT \
+            -v "$GITHUB_WORKSPACE:/build" \
+            -v "$GITHUB_WORKSPACE/output:/opt" \
+            openssh-builder:${OS_TAG}-${TARGET_ARCH} \
+            bash -c "ls /build; cd \$(dirname \$(find /build -name build_openssh.sh | head -1)) && echo 1 | bash build_openssh.sh"
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist
+          find output -name "*.tar.gz" -exec cp {} dist/ \; || true
+          ls -lh dist/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: openssh-rpms-${{ env.OS_TAG }}-${{ env.TARGET_ARCH }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+      # 可选: 自动发 Release（打 tag 或手动触发时）
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz

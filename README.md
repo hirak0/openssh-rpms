@@ -1,0 +1,95 @@
+# OpenSSH RPM Docker 一键编译
+
+基于 [nugent1a/openssh-rpms](https://github.com/nugent1a/openssh-rpms)，用 Docker 在任意宿主机（含 Windows/WSL2、macOS、Linux）上编译出目标系统的 OpenSSH RPM 包。
+
+## 目录结构
+
+```
+openssh-rpms-docker/
+├── build.sh              # 一键编译脚本（入口）
+├── Dockerfile            # 编译环境镜像（基础镜像可参数化）
+├── repo/                 # 克隆的上游仓库（含 build_openssh.sh）
+└── output/               # 编译产物输出目录（自动创建）
+```
+
+## 使用步骤
+
+1. **准备源码包**，放到本目录（`openssh-rpms-docker/`）下：
+   - `openssh-10.0p2.tar.gz`（版本任选）
+   - `openssl-3.3.1.tar.gz`
+   - 可选：`x11-ssh-askpass-*.tar.gz`
+
+   下载地址：https://www.openssh.com/releasenotes.html / https://www.openssl.org/source/
+
+2. **一键编译**（默认 CentOS 7）：
+
+   ```bash
+   cd openssh-rpms-docker
+   bash build.sh
+   ```
+
+3. **指定目标系统**：
+
+   ```bash
+   # Rocky Linux 9
+   bash build.sh -i rockylinux:9 -t el9
+
+   # openEuler 22.03
+   bash build.sh -i openeuler/openeuler:22.03-lts -t oe22
+
+   # 麒麟 V10 SP3（用你拿到的麒麟基础镜像）
+   bash build.sh -i <kylin-v10-sp3镜像名> -t ky10
+   ```
+
+4. **取产物**：编译完成后 RPM 打包在 `output/openssh-<版本>-rpms-<标签>-<架构>.tar.gz`。
+
+## ARM (aarch64) 编译
+
+`build_openssh.sh` 用 `uname -m` 自动探测架构，产物自动打上 `x86_64` 或 `aarch64` 标记，无需改脚本。
+
+**方式一：在 ARM 服务器上编译（推荐，鲲鹏/飞腾等）**
+
+直接用多架构基础镜像，其余步骤完全相同：
+
+```bash
+bash build.sh -i rockylinux:9 -t el9        # 多架构镜像自动拉 arm64 层
+bash build.sh -i <麒麟V10-ARM镜像> -t ky10
+```
+
+⚠️ 官方 `centos:7` 没有 arm64 版本，ARM 环境请用 rockylinux:8/9、openEuler 或麒麟 ARM 镜像。
+
+**方式二：在 x86 电脑上交叉编译（QEMU 模拟，慢 3-10 倍）**
+
+```bash
+# 首次先安装 ARM 模拟支持
+docker run --privileged --rm tonistiigi/binfmt --install arm64
+
+# 编译（-p 指定目标平台）
+bash build.sh -p linux/arm64 -i rockylinux:9 -t el9
+```
+
+脚本会把镜像和容器都跑在 `linux/arm64` 下，产物为 aarch64 RPM。编译 OpenSSL + OpenSSH 在 QEMU 下可能需要 1-3 小时，建议优先用方式一。
+
+## 安装到目标机器（以 el7 为例）
+
+```bash
+tar zxvf openssh-*.tar.gz
+yum remove openssh* -y
+yum install -y openssh-*/openssh-*
+systemctl restart sshd
+```
+
+⚠️ **不要关闭旧的 SSH 窗口**，新开一个连接验证成功后再退出，防止失联。建议提前开启 Telnet 等备用通道。
+
+## 工作原理
+
+- `Dockerfile` 以目标系统为基础镜像，预装全部编译依赖（rpm-build/gcc/perl 模块/pam/krb5/gtk2 等）。
+- `build.sh` 把当前目录挂载到容器 `/build`（脚本在其中探测源码包），把 `./output` 挂载到 `/opt` 直接接住产物。
+- 容器内执行 `echo 1 | bash build_openssh.sh` 自动应答依赖安装交互。
+
+## 常见问题
+
+- **CentOS 7 镜像源 404**：Dockerfile 已自动切到 vault.centos.org，无需处理。
+- **麒麟 V10 镜像哪里找**：需要内部信创源或华为云/阿里云上的麒麟官方镜像；`ky10` 标签只是产物命名，脚本本身兼容任何 yum 系系统。
+- **更换源码版本**：直接替换目录里的 tar.gz 即可，脚本自动探测文件名中的版本号。
+- **强制重建镜像**：`bash build.sh -f`。
