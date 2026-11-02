@@ -83,11 +83,12 @@ jobs:
     env:
       SSH_VERSION: ${{ needs.resolve.outputs.ssh_version }}
       SSL_VERSION: ${{ needs.resolve.outputs.ssl_version }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Download and verify
         run: |
           set -e
-          CURL=(curl --retry 3 --connect-timeout 15 --max-time 300 -fsSL)
+          CURL=(curl --retry 3 --retry-all-errors --connect-timeout 15 --max-time 300 -fsSL)
           "${CURL[@]}" -o "openssh-${SSH_VERSION}.tar.gz" \
             "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-${SSH_VERSION}.tar.gz" \
             || "${CURL[@]}" -o "openssh-${SSH_VERSION}.tar.gz" \
@@ -97,7 +98,7 @@ jobs:
           "${CURL[@]}" -o openssh-release-key.asc \
             "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/RELEASE_KEY.asc"
           export GNUPGHOME="$(mktemp -d)"
-          gpg --batch --import openssh-release-key.asc
+          gpg --batch --import openssh-release-key.asc >/dev/null 2>&1
           SIGNER="$(gpg --batch --status-fd 1 --verify "openssh-${SSH_VERSION}.tar.gz.asc" "openssh-${SSH_VERSION}.tar.gz" 2>/dev/null \
             | awk '$2 == "VALIDSIG" { print $3 }')"
           case "$SIGNER" in
@@ -110,6 +111,9 @@ jobs:
             || "${CURL[@]}" -o "openssl-${SSL_VERSION}.tar.gz" \
               "https://mirrors.tuna.tsinghua.edu.cn/openssl/source/openssl-${SSL_VERSION}.tar.gz"
           OPENSSL_SHA256="$("${CURL[@]}" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
             "https://api.github.com/repos/openssl/openssl/releases/tags/openssl-${SSL_VERSION}" \
             | jq -r --arg name "openssl-${SSL_VERSION}.tar.gz" '.assets[] | select(.name == $name) | .digest' \
             | sed 's/^sha256://')"
