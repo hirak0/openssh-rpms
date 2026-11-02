@@ -7,7 +7,7 @@
 #      可选参数: ssh_version / ssl_version / os / arch
 #   2. 把 openssh-*.tar.gz 等源码包提交到仓库根目录后 push
 #
-# 产物: Actions 运行页面的 Artifacts 里下载
+# 产物: 自动发布到 GitHub Releases，同时保留 Actions Artifacts
 #       openssh-<版本>-rpms-<标签>-<架构>.tar.gz
 # =============================================================
 name: Build OpenSSH RPM
@@ -18,13 +18,13 @@ on:
       ssh_version:
         description: "OpenSSH 版本（留空则用仓库里已有的 tar.gz，无 tar.gz 时自动下载此版本源码）"
         required: false
-        default: "10.0p2"
+        default: "10.6p1"
       ssl_version:
         description: "OpenSSL 版本"
         required: false
-        default: "3.3.1"
+        default: "3.5.9"
       os:
-        description: "目标系统（BASE_IMAGE:OS_TAG）"
+        description: "目标系统（BASE_IMAGE:OS_VERSION:OS_TAG）"
         required: false
         default: "centos:7:el7"
         type: choice
@@ -52,14 +52,15 @@ on:
 
 jobs:
   build:
+    permissions:
+      contents: write
+
     # aarch64: 用 GitHub 原生 ARM Runner（ubuntu-24.04-arm，真机，比 QEMU 快得多）
     # 私有仓库若无 ARM Runner 权益，可把 runs-on 改回 ubuntu-latest，
     # 走 QEMU 交叉编译（下方已有对应 PLAT 逻辑，无需其他改动）
     runs-on: ${{ (github.event_name == 'workflow_dispatch' && inputs.arch == 'aarch64') && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     env:
-      OS_IMAGE: ${{ github.event_name == 'workflow_dispatch' && inputs.os && split(inputs.os, ':')[0] || 'centos' }}
-      OS_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.os && split(inputs.os, ':')[1] || '7' }}
-      OS_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.os && split(inputs.os, ':')[2] || 'el7' }}
+      OS_CONFIG: ${{ github.event_name == 'workflow_dispatch' && inputs.os || 'centos:7:el7' }}
       TARGET_ARCH: ${{ github.event_name == 'workflow_dispatch' && inputs.arch || 'x86_64' }}
       SSH_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.ssh_version || '' }}
       SSL_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.ssl_version || '' }}
@@ -67,6 +68,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Set build target
+        run: |
+          OS_TAG="${OS_CONFIG##*:}"
+          IMAGE_AND_VERSION="${OS_CONFIG%:*}"
+          OS_VERSION="${IMAGE_AND_VERSION##*:}"
+          OS_IMAGE="${IMAGE_AND_VERSION%:*}"
+          [ -n "$OS_IMAGE" ] && [ -n "$OS_VERSION" ] && [ -n "$OS_TAG" ] && [ "$OS_IMAGE" != "$IMAGE_AND_VERSION" ] \
+            || { echo "无效的目标系统: $OS_CONFIG（应为 BASE_IMAGE:OS_VERSION:OS_TAG）"; exit 1; }
+          printf 'OS_IMAGE=%s\nOS_VERSION=%s\nOS_TAG=%s\n' "$OS_IMAGE" "$OS_VERSION" "$OS_TAG" >> "$GITHUB_ENV"
 
       # 私有仓库 / 或想手动指定平台时走 QEMU 路线
       - name: Set up QEMU (arm64 cross-build on x86 runner)
@@ -125,6 +136,9 @@ jobs:
           mkdir -p dist
           find output -name "*.tar.gz" -exec cp {} dist/ \; || true
           ls -lh dist/
+          ARTIFACT_NAME="$(basename "$(find dist -maxdepth 1 -name '*.tar.gz' -print -quit)")"
+          [ -n "$ARTIFACT_NAME" ] || { echo "未找到 Release 产物"; exit 1; }
+          echo "RELEASE_TAG=${ARTIFACT_NAME%.tar.gz}" >> "$GITHUB_ENV"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -133,9 +147,12 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
 
-      # 可选: 自动发 Release（打 tag 或手动触发时）
       - name: Release
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
           files: dist/*.tar.gz
+          fail_on_unmatched_files: true
+          overwrite_files: true

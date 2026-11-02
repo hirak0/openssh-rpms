@@ -15,8 +15,10 @@
 ARG BASE_IMAGE=centos:7
 FROM ${BASE_IMAGE}
 
-# 替换国内源（仅对 yum 系有效，失败不影响构建）
-RUN (sed -i -e 's|^mirrorlist=|#mirrorlist=|' -e 's|^#baseurl=http://mirror.centos.org|baseurl=https://vault.centos.org|' /etc/yum.repos.d/*.repo 2>/dev/null || true) \
+# CentOS 7 已停止维护，固定到最终归档仓库
+RUN (sed -i -e 's|^mirrorlist=|#mirrorlist=|' \
+     -e 's|^#baseurl=http://mirror.centos.org/centos/\$releasever|baseurl=https://vault.centos.org/7.9.2009|' \
+     /etc/yum.repos.d/CentOS-*.repo 2>/dev/null || true) \
  && (yum clean all 2>/dev/null || true)
 
 # 预装编译依赖，容器内即可跳过脚本里的交互式依赖安装
