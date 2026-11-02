@@ -4,7 +4,12 @@
 
 ## GitHub Actions 自动构建
 
-修改 `.github/workflows/build-openssh.yml` 顶部的版本号并推送：
+工作流每天北京时间 10:00 自动检查 OpenSSH 最新稳定版和 OpenSSL 最新 LTS
+补丁版。对应版本组合的 Release 不存在时自动构建，已有 Release 时跳过。
+OpenSSH 发布签名者必须命中工作流中的可信指纹白名单；上游轮换密钥时任务会安全失败，
+需人工核验并更新白名单。
+
+也可以修改 `.github/workflows/build-openssh.yml` 顶部的固定版本号并推送，或手动运行：
 
 ```yaml
 env:
@@ -12,8 +17,9 @@ env:
   SSL_VERSION: "3.5.9"
 ```
 
-工作流会并行构建 26 个目标，全部成功后发布到同一个
-`v<OpenSSH版本>-b<运行编号>` Release，同时保留每个目标的 Actions Artifact。
+推送和手动运行使用上述固定版本；定时运行使用自动检测版本。工作流会并行构建26个目标，
+全部成功后发布到 `openssh-<OpenSSH版本>-openssl-<OpenSSL版本>` Release，
+同时保留每个目标的 Actions Artifact。
 
 | 系统 | x86_64 | aarch64 |
 | --- | --- | --- |
@@ -34,6 +40,7 @@ UOS 20 目标参考 [boypt/openssh-rpms](https://github.com/boypt/openssh-rpms)�
 ```
 openssh-rpms-docker/
 ├── build.sh              # 一键编译脚本（入口）
+├── install.sh            # RPM 安装、配置校验和服务重启
 ├── Dockerfile            # 编译环境镜像（基础镜像可参数化）
 ├── repo/                 # 克隆的上游仓库（含 build_openssh.sh）
 └── output/               # 编译产物输出目录（自动创建）
@@ -101,9 +108,15 @@ bash build.sh -p linux/arm64 -i rockylinux/rockylinux:9 -t el9
 
 ```bash
 tar zxvf openssh-*.tar.gz
-yum remove openssh* -y
-yum install -y openssh-*/openssh-*
-systemctl restart sshd
+cd openssh-*-rpms-*
+sudo ./install.sh
+```
+
+安装脚本默认保留现有SELinux和SSH登录策略；它会备份 `sshd_config`、安装RPM、
+执行 `sshd -t`，验证成功后才重启服务。确实需要关闭SELinux并允许root密码登录时：
+
+```bash
+sudo env ALLOW_ROOT_PASSWORD=1 DISABLE_SELINUX=1 ./install.sh
 ```
 
 ⚠️ **不要关闭旧的 SSH 窗口**，新开一个连接验证成功后再退出，防止失联。建议提前开启 Telnet 等备用通道。

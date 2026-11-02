@@ -1,6 +1,9 @@
 name: Build OpenSSH RPM Matrix
 
 on:
+  schedule:
+    # 每天北京时间 10:00 检查上游稳定版。
+    - cron: "0 2 * * *"
   workflow_dispatch:
   push:
     paths:
@@ -8,6 +11,7 @@ on:
       - "openssl-*.tar.gz"
       - "Dockerfile"
       - "build_openssh.sh"
+      - "install.sh"
       - "openssh-uos20-kernel-panic-fix.patch"
       - ".github/workflows/build-openssh.yml"
 
@@ -17,11 +21,68 @@ env:
   SSL_VERSION: "3.5.9"
 
 jobs:
-  sources:
-    name: Download and verify sources
+  resolve:
+    name: Resolve versions
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      ssh_version: ${{ steps.versions.outputs.ssh_version }}
+      ssl_version: ${{ steps.versions.outputs.ssl_version }}
+      release_tag: ${{ steps.versions.outputs.release_tag }}
+      should_build: ${{ steps.versions.outputs.should_build }}
+    steps:
+      - name: Resolve upstream versions
+        id: versions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          CURL=(curl --retry 3 --retry-all-errors --connect-timeout 15 --max-time 120 -fsSL)
+          if [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
+            SSH="$("${CURL[@]}" https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/ \
+              | grep -oE 'openssh-[0-9]+\.[0-9]+p[0-9]+\.tar\.gz' \
+              | sed -E 's/^openssh-//;s/\.tar\.gz$//' | sort -Vu | tail -1)"
+            SSL="$("${CURL[@]}" https://openssl-library.org/source/ \
+              | perl -0ne 'while (/<tr>\s*<td>[^<]*\[LTS\]<\/td>.*?openssl-([0-9]+\.[0-9]+\.[0-9]+)\.tar\.gz/sg) { print "$1\n" }' \
+              | sort -Vu | tail -1)"
+          else
+            SSH="$SSH_VERSION"
+            SSL="$SSL_VERSION"
+          fi
+          [ -n "$SSH" ] && [ -n "$SSL" ] || { echo "未检测到有效版本"; exit 1; }
+
+          RELEASE_TAG="openssh-${SSH}-openssl-${SSL}"
+          SHOULD_BUILD=true
+          if [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
+            STATUS="$(curl --retry 3 --retry-all-errors --connect-timeout 15 --max-time 60 -sS \
+              -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}")"
+            case "$STATUS" in
+              200) SHOULD_BUILD=false ;;
+              404) ;;
+              *) echo "检查 Release 失败，HTTP $STATUS"; exit 1 ;;
+            esac
+          fi
+
+          echo "OpenSSH=$SSH OpenSSL-LTS=$SSL release=$RELEASE_TAG build=$SHOULD_BUILD"
+          echo "ssh_version=$SSH" >> "$GITHUB_OUTPUT"
+          echo "ssl_version=$SSL" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "should_build=$SHOULD_BUILD" >> "$GITHUB_OUTPUT"
+
+  sources:
+    name: Download and verify sources
+    needs: resolve
+    if: needs.resolve.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      SSH_VERSION: ${{ needs.resolve.outputs.ssh_version }}
+      SSL_VERSION: ${{ needs.resolve.outputs.ssl_version }}
     steps:
       - name: Download and verify
         run: |
@@ -39,8 +100,11 @@ jobs:
           gpg --batch --import openssh-release-key.asc
           SIGNER="$(gpg --batch --status-fd 1 --verify "openssh-${SSH_VERSION}.tar.gz.asc" "openssh-${SSH_VERSION}.tar.gz" 2>/dev/null \
             | awk '$2 == "VALIDSIG" { print $3 }')"
-          [ "$SIGNER" = "7168B983815A5EEF59A4ADFD2A3F414E736060BA" ] \
-            || { echo "OpenSSH 签名指纹校验失败: $SIGNER"; exit 1; }
+          case "$SIGNER" in
+            7168B983815A5EEF59A4ADFD2A3F414E736060BA) ;;
+            *) echo "OpenSSH 签名者不在可信白名单: $SIGNER"; exit 1 ;;
+          esac
+          echo "OpenSSH 签名者: $SIGNER"
           "${CURL[@]}" -o "openssl-${SSL_VERSION}.tar.gz" \
             "https://github.com/openssl/openssl/releases/download/openssl-${SSL_VERSION}/openssl-${SSL_VERSION}.tar.gz" \
             || "${CURL[@]}" -o "openssl-${SSL_VERSION}.tar.gz" \
@@ -65,7 +129,7 @@ jobs:
 
   build:
     name: ${{ matrix.target }} / ${{ matrix.arch }}
-    needs: sources
+    needs: [resolve, sources]
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -257,6 +321,8 @@ jobs:
             uos20: "1"
 
     env:
+      SSH_VERSION: ${{ needs.resolve.outputs.ssh_version }}
+      SSL_VERSION: ${{ needs.resolve.outputs.ssl_version }}
       TARGET_ID: ${{ matrix.target }}
       TARGET_ARCH: ${{ matrix.arch }}
       TARGET_PLATFORM: ${{ matrix.platform }}
@@ -303,6 +369,8 @@ jobs:
           set -e
           SOURCE="$(find output -maxdepth 1 -type f -name '*.tar.gz' -print -quit)"
           [ -n "$SOURCE" ] || { echo "未找到 RPM 压缩包"; exit 1; }
+          tar -tzf "$SOURCE" | grep -q '/install.sh$' \
+            || { echo "RPM 压缩包中缺少 install.sh"; exit 1; }
           mkdir -p dist
           cp "$SOURCE" "dist/openssh-${SSH_VERSION}-rpms-${TARGET_ID}-${TARGET_ARCH}.tar.gz"
           ls -lh dist/
@@ -316,10 +384,14 @@ jobs:
 
   release:
     name: Publish Release
-    needs: build
+    needs: [resolve, build]
+    if: needs.resolve.outputs.should_build == 'true' && needs.build.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      SSH_VERSION: ${{ needs.resolve.outputs.ssh_version }}
+      SSL_VERSION: ${{ needs.resolve.outputs.ssl_version }}
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -331,15 +403,14 @@ jobs:
       - name: Prepare Release
         run: |
           set -e
-          echo "RELEASE_TAG=v${SSH_VERSION}-b${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
           test "$(find release-assets -maxdepth 1 -name '*.tar.gz' | wc -l)" -eq 26
           ls -lh release-assets/
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          name: OpenSSH ${{ env.SSH_VERSION }} RPMs (build ${{ github.run_number }})
+          tag_name: ${{ needs.resolve.outputs.release_tag }}
+          name: OpenSSH ${{ env.SSH_VERSION }} + OpenSSL ${{ env.SSL_VERSION }} RPMs
           target_commitish: ${{ github.sha }}
           files: release-assets/*.tar.gz
           fail_on_unmatched_files: true

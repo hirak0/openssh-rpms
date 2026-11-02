@@ -315,16 +315,15 @@ rm -rf %{buildroot}
 systemctl daemon-reload
 if ls /etc/ssh/ssh_host_*_key >/dev/null 2>&1; then chmod 600 /etc/ssh/ssh_host_*_key; fi
 systemctl enable sshd
-systemctl restart sshd
 
 %preun server
 if [ \$1 -eq 0 ]; then systemctl disable --now sshd; fi
 
 %files
 %defattr(-,root,root)
-/etc/ssh/moduli
-/etc/ssh/ssh_config
-/etc/ssh/sshd_config
+%config(noreplace) /etc/ssh/moduli
+%config(noreplace) /etc/ssh/ssh_config
+%config(noreplace) /etc/ssh/sshd_config
 /usr/libexec/openssh/ssh-keysign
 /usr/libexec/openssh/ssh-pkcs11-helper
 /usr/libexec/openssh/ssh-sk-helper
@@ -333,7 +332,7 @@ if [ \$1 -eq 0 ]; then systemctl disable --now sshd; fi
 %files server
 %defattr(-,root,root)
 /usr/lib/systemd/system/sshd.service
-/etc/pam.d/sshd
+%config(noreplace) /etc/pam.d/sshd
 /usr/sbin/sshd
 /usr/libexec/openssh/sftp-server
 /usr/libexec/openssh/sshd-session
@@ -421,6 +420,8 @@ TAR_NAME="${PACKAGE_NAME}.tar.gz"
 run_task "整理并压缩安装包" "07_package.log" \
     "mkdir -p ${OUTPUT_DIR}/${PACKAGE_NAME} && \
      cp ${RPMBUILD_DIR}/RPMS/${ARCH_TAG}/*.rpm ${OUTPUT_DIR}/${PACKAGE_NAME}/ && \
+     cp ${BASE_DIR}/install.sh ${OUTPUT_DIR}/${PACKAGE_NAME}/ && \
+     chmod 755 ${OUTPUT_DIR}/${PACKAGE_NAME}/install.sh && \
      cd ${OUTPUT_DIR} && \
      tar czf ${TAR_NAME} ${PACKAGE_NAME} && \
      rm -rf ${PACKAGE_NAME}"
