@@ -4,7 +4,7 @@
 #
 # 触发方式:
 #   1. 手动: Actions 页面 -> Build OpenSSH RPM -> Run workflow
-#      可选参数: ssh_version / ssl_version / os / arch
+#      可选参数: os / arch
 #   2. 把 openssh-*.tar.gz 等源码包提交到仓库根目录后 push
 #
 # 产物: 自动发布到 GitHub Releases，同时保留 Actions Artifacts
@@ -15,14 +15,6 @@ name: Build OpenSSH RPM
 on:
   workflow_dispatch:
     inputs:
-      ssh_version:
-        description: "OpenSSH 版本（留空则用仓库里已有的 tar.gz，无 tar.gz 时自动下载此版本源码）"
-        required: false
-        default: "10.6p1"
-      ssl_version:
-        description: "OpenSSL 版本"
-        required: false
-        default: "3.5.9"
       os:
         description: "目标系统（BASE_IMAGE:OS_VERSION:OS_TAG）"
         required: false
@@ -50,6 +42,11 @@ on:
       - "openssl-*.tar.gz"
       - ".github/workflows/build-openssh.yml"
 
+# 修改这里的版本号并推送，即会自动构建并发布 Release
+env:
+  SSH_VERSION: "10.6p1"
+  SSL_VERSION: "3.5.9"
+
 jobs:
   build:
     permissions:
@@ -62,8 +59,6 @@ jobs:
     env:
       OS_CONFIG: ${{ github.event_name == 'workflow_dispatch' && inputs.os || 'centos:7:el7' }}
       TARGET_ARCH: ${{ github.event_name == 'workflow_dispatch' && inputs.arch || 'x86_64' }}
-      SSH_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.ssh_version || '' }}
-      SSL_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.ssl_version || '' }}
 
     steps:
       - name: Checkout
