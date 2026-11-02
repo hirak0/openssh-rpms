@@ -1,153 +1,347 @@
-# =============================================================
-# OpenSSH RPM GitHub Actions 编译
-# 放到仓库的 .github/workflows/build-openssh.yml
-#
-# 触发方式:
-#   1. 手动: Actions 页面 -> Build OpenSSH RPM -> Run workflow
-#      可选参数: os / arch
-#   2. 把 openssh-*.tar.gz 等源码包提交到仓库根目录后 push
-#
-# 产物: 自动发布到 GitHub Releases，同时保留 Actions Artifacts
-#       openssh-<版本>-rpms-<标签>-<架构>.tar.gz
-# =============================================================
-name: Build OpenSSH RPM
+name: Build OpenSSH RPM Matrix
 
 on:
   workflow_dispatch:
-    inputs:
-      os:
-        description: "目标系统（BASE_IMAGE:OS_VERSION:OS_TAG）"
-        required: false
-        default: "centos:7:el7"
-        type: choice
-        options:
-          - "centos:7:el7"
-          - "quay.io/centos/centos:stream8:el8"
-          - "rockylinux:8:el8"
-          - "rockylinux:9:el9"
-          - "openeuler/openeuler:22.03-lts:oe22"
-          # 麒麟 V10: 需把基础镜像推到 GHCR/你的私有 registry 后填 <镜像>:ky10
-          # - "ghcr.io/<你的用户名>/kylin-v10-sp3:ky10"
-      arch:
-        description: "目标架构"
-        required: false
-        default: "x86_64"
-        type: choice
-        options:
-          - "x86_64"
-          - "aarch64"
   push:
     paths:
       - "openssh-*.tar.gz"
       - "openssl-*.tar.gz"
+      - "Dockerfile"
+      - "build_openssh.sh"
+      - "openssh-uos20-kernel-panic-fix.patch"
       - ".github/workflows/build-openssh.yml"
 
-# 修改这里的版本号并推送，即会自动构建并发布 Release
+# 修改这里的版本号并推送，即会构建全部目标并发布一个 Release。
 env:
   SSH_VERSION: "10.6p1"
   SSL_VERSION: "3.5.9"
 
 jobs:
-  build:
+  sources:
+    name: Download and verify sources
+    runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
+    steps:
+      - name: Download and verify
+        run: |
+          set -e
+          CURL=(curl --retry 3 --connect-timeout 15 --max-time 300 -fsSL)
+          "${CURL[@]}" -o "openssh-${SSH_VERSION}.tar.gz" \
+            "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-${SSH_VERSION}.tar.gz" \
+            || "${CURL[@]}" -o "openssh-${SSH_VERSION}.tar.gz" \
+              "https://mirrors.tuna.tsinghua.edu.cn/OpenBSD/OpenSSH/portable/openssh-${SSH_VERSION}.tar.gz"
+          "${CURL[@]}" -o "openssh-${SSH_VERSION}.tar.gz.asc" \
+            "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-${SSH_VERSION}.tar.gz.asc"
+          "${CURL[@]}" -o openssh-release-key.asc \
+            "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/RELEASE_KEY.asc"
+          export GNUPGHOME="$(mktemp -d)"
+          gpg --batch --import openssh-release-key.asc
+          SIGNER="$(gpg --batch --status-fd 1 --verify "openssh-${SSH_VERSION}.tar.gz.asc" "openssh-${SSH_VERSION}.tar.gz" 2>/dev/null \
+            | awk '$2 == "VALIDSIG" { print $3 }')"
+          [ "$SIGNER" = "7168B983815A5EEF59A4ADFD2A3F414E736060BA" ] \
+            || { echo "OpenSSH 签名指纹校验失败: $SIGNER"; exit 1; }
+          "${CURL[@]}" -o "openssl-${SSL_VERSION}.tar.gz" \
+            "https://github.com/openssl/openssl/releases/download/openssl-${SSL_VERSION}/openssl-${SSL_VERSION}.tar.gz" \
+            || "${CURL[@]}" -o "openssl-${SSL_VERSION}.tar.gz" \
+              "https://mirrors.tuna.tsinghua.edu.cn/openssl/source/openssl-${SSL_VERSION}.tar.gz"
+          OPENSSL_SHA256="$("${CURL[@]}" \
+            "https://api.github.com/repos/openssl/openssl/releases/tags/openssl-${SSL_VERSION}" \
+            | jq -r --arg name "openssl-${SSL_VERSION}.tar.gz" '.assets[] | select(.name == $name) | .digest' \
+            | sed 's/^sha256://')"
+          [ -n "$OPENSSL_SHA256" ] && [ "$OPENSSL_SHA256" != "null" ] \
+            || { echo "未找到 OpenSSL 官方 SHA256"; exit 1; }
+          printf '%s  %s\n' "$OPENSSL_SHA256" "openssl-${SSL_VERSION}.tar.gz" | sha256sum -c -
 
-    # aarch64: 用 GitHub 原生 ARM Runner（ubuntu-24.04-arm，真机，比 QEMU 快得多）
-    # 私有仓库若无 ARM Runner 权益，可把 runs-on 改回 ubuntu-latest，
-    # 走 QEMU 交叉编译（下方已有对应 PLAT 逻辑，无需其他改动）
-    runs-on: ${{ (github.event_name == 'workflow_dispatch' && inputs.arch == 'aarch64') && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+      - name: Upload verified sources
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-sources
+          path: |
+            openssh-${{ env.SSH_VERSION }}.tar.gz
+            openssl-${{ env.SSL_VERSION }}.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  build:
+    name: ${{ matrix.target }} / ${{ matrix.arch }}
+    needs: sources
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: centos7
+            arch: x86_64
+            platform: linux/amd64
+            runner: ubuntu-latest
+            image: "centos:7"
+            os_tag: el7
+            uos20: "0"
+          - target: centos7
+            arch: aarch64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            image: "centos:7"
+            os_tag: el7
+            uos20: "0"
+          - target: centos-stream8
+            arch: x86_64
+            platform: linux/amd64
+            runner: ubuntu-latest
+            image: "quay.io/centos/centos:stream8"
+            os_tag: el8
+            uos20: "0"
+          - target: centos-stream8
+            arch: aarch64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            image: "quay.io/centos/centos:stream8"
+            os_tag: el8
+            uos20: "0"
+          - target: centos-stream9
+            arch: x86_64
+            platform: linux/amd64
+            runner: ubuntu-latest
+            image: "quay.io/centos/centos:stream9"
+            os_tag: el9
+            uos20: "0"
+          - target: centos-stream9
+            arch: aarch64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            image: "quay.io/centos/centos:stream9"
+            os_tag: el9
+            uos20: "0"
+          - target: rockylinux8
+            arch: x86_64
+            platform: linux/amd64
+            runner: ubuntu-latest
+            image: "rockylinux/rockylinux:8"
+            os_tag: el8
+            uos20: "0"
+          - target: rockylinux8
+            arch: aarch64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            image: "rockylinux/rockylinux:8"
+            os_tag: el8
+            uos20: "0"
+          - target: rockylinux9
+            arch: x86_64
+            platform: linux/amd64
+            runner: ubuntu-latest
+            image: "rockylinux/rockylinux:9"
+            os_tag: el9
+            uos20: "0"
+          - target: rockylinux9
+            arch: aarch64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            image: "rockylinux/rockylinux:9"
+            os_tag: el9
+            uos20: "0"
+          - target: rockylinux10
+            arch: x86_64
+            platform: linux/amd64
+            runner: ubuntu-latest
+            image: "rockylinux/rockylinux:10"
+            os_tag: el10
+            uos20: "0"
+          - target: rockylinux10
+            arch: aarch64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            image: "rockylinux/rockylinux:10"
+            os_tag: el10
+            uos20: "0"
+          - target: openeuler-24.03-sp2
+            arch: x86_64
+            platform: linux/amd64
+            runner: ubuntu-latest
+            image: "openeuler/openeuler:24.03-lts-sp2"
+            os_tag: oe2403sp2
+            uos20: "0"
+          - target: openeuler-24.03-sp2
+            arch: aarch64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            image: "openeuler/openeuler:24.03-lts-sp2"
+            os_tag: oe2403sp2
+            uos20: "0"
+          - target: openeuler-24.03-sp3
+            arch: x86_64
+            platform: linux/amd64
+            runner: ubuntu-latest
+            image: "openeuler/openeuler:24.03-lts-sp3"
+            os_tag: oe2403sp3
+            uos20: "0"
+          - target: openeuler-24.03-sp3
+            arch: aarch64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            image: "openeuler/openeuler:24.03-lts-sp3"
+            os_tag: oe2403sp3
+            uos20: "0"
+          - target: openeuler-24.03-sp4
+            arch: x86_64
+            platform: linux/amd64
+            runner: ubuntu-latest
+            image: "openeuler/openeuler:24.03-lts-sp4"
+            os_tag: oe2403sp4
+            uos20: "0"
+          - target: openeuler-24.03-sp4
+            arch: aarch64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            image: "openeuler/openeuler:24.03-lts-sp4"
+            os_tag: oe2403sp4
+            uos20: "0"
+          - target: kylin-v10-sp1
+            arch: x86_64
+            platform: linux/amd64
+            runner: ubuntu-latest
+            image: "hxsoong/kylin@sha256:93ba61a4785720106a5d02306042c06f4465bfcd5f577246b0a4b8d5a699d697"
+            os_tag: ky10sp1
+            uos20: "0"
+          - target: kylin-v10-sp1
+            arch: aarch64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            image: "hxsoong/kylin@sha256:93ba61a4785720106a5d02306042c06f4465bfcd5f577246b0a4b8d5a699d697"
+            os_tag: ky10sp1
+            uos20: "0"
+          - target: kylin-v10-sp2
+            arch: x86_64
+            platform: linux/amd64
+            runner: ubuntu-latest
+            image: "hxsoong/kylin@sha256:a22d6cb8b9e407e8cbcaf1c20517b9807d79ec5015ecb59ca492fb84fe298ed5"
+            os_tag: ky10sp2
+            uos20: "0"
+          - target: kylin-v10-sp2
+            arch: aarch64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            image: "hxsoong/kylin@sha256:a22d6cb8b9e407e8cbcaf1c20517b9807d79ec5015ecb59ca492fb84fe298ed5"
+            os_tag: ky10sp2
+            uos20: "0"
+          - target: kylin-v10-sp3
+            arch: x86_64
+            platform: linux/amd64
+            runner: ubuntu-latest
+            image: "hxsoong/kylin@sha256:b49a72ecf3213e00c5316935a51594c11d43fbccb13ad0cecf939f0f1c1101a3"
+            os_tag: ky10sp3
+            uos20: "0"
+          - target: kylin-v10-sp3
+            arch: aarch64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            image: "hxsoong/kylin@sha256:b49a72ecf3213e00c5316935a51594c11d43fbccb13ad0cecf939f0f1c1101a3"
+            os_tag: ky10sp3
+            uos20: "0"
+          - target: uos20
+            arch: x86_64
+            platform: linux/amd64
+            runner: ubuntu-latest
+            image: "quay.io/centos/centos:stream8"
+            os_tag: uos20
+            uos20: "1"
+          - target: uos20
+            arch: aarch64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            image: "quay.io/centos/centos:stream8"
+            os_tag: uos20
+            uos20: "1"
+
     env:
-      OS_CONFIG: ${{ github.event_name == 'workflow_dispatch' && inputs.os || 'centos:7:el7' }}
-      TARGET_ARCH: ${{ github.event_name == 'workflow_dispatch' && inputs.arch || 'x86_64' }}
+      TARGET_ID: ${{ matrix.target }}
+      TARGET_ARCH: ${{ matrix.arch }}
+      TARGET_PLATFORM: ${{ matrix.platform }}
+      BASE_IMAGE: ${{ matrix.image }}
+      FORCE_OS_TAG: ${{ matrix.os_tag }}
+      UOS20: ${{ matrix.uos20 }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Set build target
-        run: |
-          OS_TAG="${OS_CONFIG##*:}"
-          IMAGE_AND_VERSION="${OS_CONFIG%:*}"
-          OS_VERSION="${IMAGE_AND_VERSION##*:}"
-          OS_IMAGE="${IMAGE_AND_VERSION%:*}"
-          [ -n "$OS_IMAGE" ] && [ -n "$OS_VERSION" ] && [ -n "$OS_TAG" ] && [ "$OS_IMAGE" != "$IMAGE_AND_VERSION" ] \
-            || { echo "无效的目标系统: $OS_CONFIG（应为 BASE_IMAGE:OS_VERSION:OS_TAG）"; exit 1; }
-          printf 'OS_IMAGE=%s\nOS_VERSION=%s\nOS_TAG=%s\n' "$OS_IMAGE" "$OS_VERSION" "$OS_TAG" >> "$GITHUB_ENV"
-
-      # 私有仓库 / 或想手动指定平台时走 QEMU 路线
-      - name: Set up QEMU (arm64 cross-build on x86 runner)
-        if: env.TARGET_ARCH == 'aarch64' && runner.arch == 'X64'
-        uses: docker/setup-qemu-action@v3
         with:
-          platforms: arm64
+          persist-credentials: false
 
-      # ---- 源码包准备 ----
-      # 情况A: 仓库里已提交 tar.gz -> 直接用
-      # 情况B: 没有源码包 -> 用指定版本号从官方下载（注意 GitHub 直连 openssh 官方源较慢，用镜像）
-      - name: Download sources if missing
-        run: |
-          set -e
-          ls openssh-*.tar.gz openssl-*.tar.gz 2>/dev/null && exit 0
-          SSH_V="${SSH_VERSION}"; SSL_V="${SSL_VERSION}"
-          [ -z "$SSH_V" ] && { echo "无源码包且未指定 SSH 版本"; exit 1; }
-          [ -z "$SSL_V" ] && { echo "无源码包且未指定 SSL 版本"; exit 1; }
-          curl -fsSLO "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-${SSH_V}.tar.gz" \
-            || curl -fsSLO "https://mirrors.tuna.tsinghua.edu.cn/OpenBSD/OpenSSH/portable/openssh-${SSH_V}.tar.gz"
-          curl -fsSLO "https://github.com/openssl/openssl/releases/download/openssl-${SSL_V}/openssl-${SSL_V}.tar.gz" \
-            || curl -fsSLO "https://mirrors.tuna.tsinghua.edu.cn/openssl/source/openssl-${SSL_V}.tar.gz"
-          ls -lh *.tar.gz
+      - name: Remove repository source archives
+        run: rm -f openssh-*.tar.gz openssl-*.tar.gz
 
-      # ---- 构建编译镜像 ----
-      # 假设仓库根目录有 Dockerfile（即本方案的 Dockerfile），
-      # build_openssh.sh 在仓库内任意位置均可（编译步骤会自动 find）
+      - name: Download verified sources
+        uses: actions/download-artifact@v4
+        with:
+          name: verified-sources
+          path: .
+
       - name: Build builder image
         run: |
           set -e
-          BASE_IMAGE="${OS_IMAGE}:${OS_VERSION}"
-          PLAT=""
-          if [ "$TARGET_ARCH" = "aarch64" ] && [ "$RUNNER_ARCH" != "ARM64" ]; then
-            PLAT="--platform linux/arm64"
-          fi
-          docker build $PLAT --build-arg BASE_IMAGE="$BASE_IMAGE" \
-            -t openssh-builder:${OS_TAG}-${TARGET_ARCH} .
+          docker build --platform "$TARGET_PLATFORM" \
+            --build-arg BASE_IMAGE="$BASE_IMAGE" \
+            -t "openssh-builder:${TARGET_ID}-${TARGET_ARCH}" .
 
-      # ---- 编译 ----
       - name: Build RPMs
         run: |
           set -e
-          PLAT=""
-          if [ "$TARGET_ARCH" = "aarch64" ] && [ "$RUNNER_ARCH" != "ARM64" ]; then
-            PLAT="--platform linux/arm64"
-          fi
           mkdir -p output
-          docker run --rm -t $PLAT \
+          docker run --rm --platform "$TARGET_PLATFORM" \
+            -e FORCE_OS_TAG="$FORCE_OS_TAG" \
+            -e UOS20="$UOS20" \
             -v "$GITHUB_WORKSPACE:/build" \
             -v "$GITHUB_WORKSPACE/output:/opt" \
-            openssh-builder:${OS_TAG}-${TARGET_ARCH} \
-            bash -c "ls /build; cd \$(dirname \$(find /build -name build_openssh.sh | head -1)) && echo 1 | bash build_openssh.sh"
+            "openssh-builder:${TARGET_ID}-${TARGET_ARCH}" \
+            bash -c "cd /build && printf '2\\n' | bash build_openssh.sh"
 
-      - name: Collect artifacts
+      - name: Collect artifact
         run: |
+          set -e
+          SOURCE="$(find output -maxdepth 1 -type f -name '*.tar.gz' -print -quit)"
+          [ -n "$SOURCE" ] || { echo "未找到 RPM 压缩包"; exit 1; }
           mkdir -p dist
-          find output -name "*.tar.gz" -exec cp {} dist/ \; || true
+          cp "$SOURCE" "dist/openssh-${SSH_VERSION}-rpms-${TARGET_ID}-${TARGET_ARCH}.tar.gz"
           ls -lh dist/
-          ARTIFACT_NAME="$(basename "$(find dist -maxdepth 1 -name '*.tar.gz' -print -quit)")"
-          [ -n "$ARTIFACT_NAME" ] || { echo "未找到 Release 产物"; exit 1; }
-          echo "RELEASE_TAG=${ARTIFACT_NAME%.tar.gz}" >> "$GITHUB_ENV"
 
-      - name: Upload artifacts
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: openssh-rpms-${{ env.OS_TAG }}-${{ env.TARGET_ARCH }}
+          name: rpms-${{ matrix.target }}-${{ matrix.arch }}
           path: dist/*.tar.gz
           if-no-files-found: error
 
-      - name: Release
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: rpms-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Prepare Release
+        run: |
+          set -e
+          echo "RELEASE_TAG=v${SSH_VERSION}-b${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+          test "$(find release-assets -maxdepth 1 -name '*.tar.gz' | wc -l)" -eq 26
+          ls -lh release-assets/
+
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: ${{ env.RELEASE_TAG }}
+          name: OpenSSH ${{ env.SSH_VERSION }} RPMs (build ${{ github.run_number }})
           target_commitish: ${{ github.sha }}
-          files: dist/*.tar.gz
+          files: release-assets/*.tar.gz
           fail_on_unmatched_files: true
           overwrite_files: true
+          generate_release_notes: true

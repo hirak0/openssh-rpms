@@ -15,22 +15,25 @@
 ARG BASE_IMAGE=centos:7
 FROM ${BASE_IMAGE}
 
-# CentOS 7 已停止维护，固定到最终归档仓库
-RUN (sed -i -e 's|^mirrorlist=|#mirrorlist=|' \
-     -e 's|^#baseurl=http://mirror.centos.org/centos/\$releasever|baseurl=https://vault.centos.org/7.9.2009|' \
-     /etc/yum.repos.d/CentOS-*.repo 2>/dev/null || true) \
- && (yum clean all 2>/dev/null || true)
+# 仅修复已停止维护的 CentOS 7 / Stream 8 软件源。
+RUN if grep -q 'CentOS Linux release 7' /etc/centos-release 2>/dev/null; then \
+      sed -i -e 's|^mirrorlist=|#mirrorlist=|' \
+        -e 's|^#baseurl=http://mirror.centos.org/centos/\$releasever|baseurl=https://vault.centos.org/7.9.2009|' \
+        -e 's|^#baseurl=http://mirror.centos.org/altarch/\$releasever|baseurl=https://vault.centos.org/altarch/7.9.2009|' \
+        /etc/yum.repos.d/CentOS-*.repo; \
+    elif grep -q 'CentOS Stream release 8' /etc/centos-release 2>/dev/null; then \
+      sed -i -e 's|^mirrorlist=|#mirrorlist=|' -e 's|^metalink=|#metalink=|' \
+        -e 's|^#baseurl=http://mirror.centos.org/\$contentdir|baseurl=https://vault.centos.org|' \
+        -e 's|^#baseurl=http://mirror.stream.centos.org/\$contentdir|baseurl=https://vault.centos.org|' \
+        /etc/yum.repos.d/CentOS-*.repo; \
+    fi \
+ && yum clean all
 
 # 预装编译依赖，容器内即可跳过脚本里的交互式依赖安装
 RUN yum install -y rpm-build gcc gcc-c++ make \
     perl perl-IPC-Cmd perl-Data-Dumper perl-Pod-Html perl-devel perl-Time-Piece \
-    zlib-devel pam-devel krb5-devel libXt-devel gtk2-devel systemd-devel \
-    tar gzip which \
- && yum clean all \
- || (echo "WARN: 部分依赖安装失败，容器内运行脚本时选择 [1] 安装" )
-
-# 编译基础工具（openssl 需要的额外 perl 模块兜底）
-RUN yum install -y perl-WWW-Curl 2>/dev/null; true
+    zlib-devel pam-devel tar gzip which patch ncurses \
+ && yum clean all
 
 WORKDIR /build
 CMD ["/bin/bash"]

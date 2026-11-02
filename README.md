@@ -2,6 +2,33 @@
 
 基于 [nugent1a/openssh-rpms](https://github.com/nugent1a/openssh-rpms)，用 Docker 在任意宿主机（含 Windows/WSL2、macOS、Linux）上编译出目标系统的 OpenSSH RPM 包。
 
+## GitHub Actions 自动构建
+
+修改 `.github/workflows/build-openssh.yml` 顶部的版本号并推送：
+
+```yaml
+env:
+  SSH_VERSION: "10.6p1"
+  SSL_VERSION: "3.5.9"
+```
+
+工作流会并行构建 26 个目标，全部成功后发布到同一个
+`v<OpenSSH版本>-b<运行编号>` Release，同时保留每个目标的 Actions Artifact。
+
+| 系统 | x86_64 | aarch64 |
+| --- | --- | --- |
+| CentOS 7 | 是 | 是（使用 CentOS AltArch 归档源） |
+| CentOS Stream 8 | 是 | 是 |
+| CentOS Stream 9 | 是 | 是 |
+| Rocky Linux 8/9/10 | 是 | 是 |
+| openEuler 24.03 LTS SP2/SP3/SP4 | 是 | 是 |
+| 银河麒麟 V10 SP1/SP2/SP3 | 是 | 是 |
+| UOS 20 兼容包 | 是 | 是 |
+
+麒麟目标使用社区镜像 `hxsoong/kylin`，并锁定多架构 digest；该镜像不是麒麟官方发布。
+UOS 20 目标参考 [boypt/openssh-rpms](https://github.com/boypt/openssh-rpms)，在 EL8
+环境构建并应用 UOS 20 内核 `dup2()` 兼容补丁，并非使用 UOS 官方容器镜像。
+
 ## 目录结构
 
 ```
@@ -32,7 +59,7 @@ openssh-rpms-docker/
 
    ```bash
    # Rocky Linux 9
-   bash build.sh -i rockylinux:9 -t el9
+   bash build.sh -i rockylinux/rockylinux:9 -t el9
 
    # openEuler 22.03
    bash build.sh -i openeuler/openeuler:22.03-lts -t oe22
@@ -52,11 +79,11 @@ openssh-rpms-docker/
 直接用多架构基础镜像，其余步骤完全相同：
 
 ```bash
-bash build.sh -i rockylinux:9 -t el9        # 多架构镜像自动拉 arm64 层
+bash build.sh -i rockylinux/rockylinux:9 -t el9  # 多架构镜像自动拉 arm64 层
 bash build.sh -i <麒麟V10-ARM镜像> -t ky10
 ```
 
-⚠️ 官方 `centos:7` 没有 arm64 版本，ARM 环境请用 rockylinux:8/9、openEuler 或麒麟 ARM 镜像。
+`centos:7` 包含 ARM64 层，但软件源已归档到 CentOS AltArch vault；Dockerfile 已自动处理。
 
 **方式二：在 x86 电脑上交叉编译（QEMU 模拟，慢 3-10 倍）**
 
@@ -65,7 +92,7 @@ bash build.sh -i <麒麟V10-ARM镜像> -t ky10
 docker run --privileged --rm tonistiigi/binfmt --install arm64
 
 # 编译（-p 指定目标平台）
-bash build.sh -p linux/arm64 -i rockylinux:9 -t el9
+bash build.sh -p linux/arm64 -i rockylinux/rockylinux:9 -t el9
 ```
 
 脚本会把镜像和容器都跑在 `linux/arm64` 下，产物为 aarch64 RPM。编译 OpenSSL + OpenSSH 在 QEMU 下可能需要 1-3 小时，建议优先用方式一。

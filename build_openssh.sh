@@ -229,6 +229,14 @@ EOF
         SOURCE1_LINE="# Source1: Askpass not present"
     fi
 
+    if [ "${UOS20:-0}" = "1" ]; then
+        UOS_PATCH_HEADER="Patch999: openssh-uos20-kernel-panic-fix.patch"
+        UOS_PATCH_PREP="%patch999 -p0"
+    else
+        UOS_PATCH_HEADER=""
+        UOS_PATCH_PREP=""
+    fi
+
     cat > ${RPMBUILD_DIR}/SPECS/openssh.spec <<SPEC_EOF
 %define ver ${OPENSSH_VERSION}
 %define rel ${RPM_RELEASE}%{?dist}
@@ -243,6 +251,7 @@ ${SOURCE1_LINE}
 Source2: sshd.pam
 Source3: ${SSL_TAR}
 Source4: sshd.service
+${UOS_PATCH_HEADER}
 License: BSD
 Group: Applications/Internet
 BuildRoot: %{_tmppath}/%{name}-%{version}-buildroot
@@ -272,6 +281,7 @@ OpenSSH Clients with static OpenSSL.
 
 %prep
 %setup -q
+${UOS_PATCH_PREP}
 mkdir -p openssl_static
 tar xfz %{SOURCE3} --strip-components=1 -C openssl_static
 pushd openssl_static
@@ -297,10 +307,6 @@ install -D -m 644 %{SOURCE2} %{buildroot}/etc/pam.d/sshd
 mkdir -p %{buildroot}/usr/lib/systemd/system/
 install -m 644 %{SOURCE4} %{buildroot}/usr/lib/systemd/system/sshd.service
 rm -f %{buildroot}/usr/share/info/dir
-cat << CONFIG >> %{buildroot}/etc/ssh/sshd_config
-PermitRootLogin yes
-PasswordAuthentication yes
-CONFIG
 
 %clean
 rm -rf %{buildroot}
@@ -347,7 +353,7 @@ SPEC_EOF
 }
 
 # ================= 主流程 =================
-OS_TAG=$(get_os_tag)
+OS_TAG="${FORCE_OS_TAG:-$(get_os_tag)}"
 ARCH_TAG=$(get_arch)
 
 detect_source_files
@@ -395,6 +401,7 @@ run_task "初始化 rpmbuild 目录" "03_init_dir.log" \
 run_task "准备源码文件" "04_copy_src.log" \
     "cp ${BASE_DIR}/${SSH_TAR} ${RPMBUILD_DIR}/SOURCES/ && \
      cp ${BASE_DIR}/${SSL_TAR} ${RPMBUILD_DIR}/SOURCES/ && \
+     ([ '${UOS20:-0}' = '1' ] && cp ${BASE_DIR}/openssh-uos20-kernel-panic-fix.patch ${RPMBUILD_DIR}/SOURCES/ || true) && \
      ([ '$HAS_ASKPASS' = true ] && cp ${BASE_DIR}/${ASKPASS_TAR} ${RPMBUILD_DIR}/SOURCES/ || true)"
 
 # 4. 配置
