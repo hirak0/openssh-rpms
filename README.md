@@ -2,7 +2,7 @@
 
 [![license](https://img.shields.io/badge/license-BSD--2--Clause-green?style=flat)](https://github.com/openssh/openssh-portable/blob/master/LICENSE)
 [![version](https://img.shields.io/badge/version-10.6p2-green?style=flat)](https://www.openssh.com/txt/release-10.6)
-[![build](https://github.com/openssh-rpms-by-hirak0/openssh-rpms/actions/workflows/build-openssh.yml/badge.svg)](https://github.com/openssh-rpms-by-hirak0/openssh-rpms/actions/workflows/build-openssh.yml)
+[![build](https://github.com/hirak0/openssh-rpms/actions/workflows/build-openssh.yml/badge.svg)](https://github.com/openssh-rpms-by-hirak0/openssh-rpms/actions/workflows/build-openssh.yml)
 [![docker](https://img.shields.io/badge/docker-24+-blue?style=flat)](https://docs.docker.com/get-docker/)
 [![openssl](https://img.shields.io/badge/OpenSSL-3.5%20LTS-lightgrey?style=flat)](https://www.openssl.org/source/)
 
@@ -137,7 +137,7 @@ curl -LO https://github.com/matthewpow/openssh-askpass/releases/download/v1.2.2/
 ### 2. 一键编译（推荐：Docker）
 
 ```bash
-git clone https://github.com/openssh-rpms-by-hirak0/openssh-rpms.git
+git clone https://github.com/hirak0/openssh-rpms.git
 cd openssh-rpms
 
 # 默认使用 rockylinux:9 编译
@@ -148,7 +148,7 @@ bash build.sh
 
 ```text
 ========================================================================
-                OpenSSH RPM Builder v3.0 by nugent1a / hirak0
+                OpenSSH RPM Builder v3.0 by hirak0
 ========================================================================
  📦 OpenSSH 源码 : openssh-10.6p2.tar.gz (v10.6p2)
  🔒 OpenSSL 源码 : openssl-3.5.9.tar.gz (v3.5.9)
@@ -302,10 +302,6 @@ CI 每天自动构建以下 **25 个目标 × 2 个架构 = 50 个 RPM 包**：
 | **SUSE FIPS 模式** | SLE 的 `patterns-base-fips` 带条件依赖 `(openssh-fips if openssh-clients)`，本包显式 `Provides: openssh-fips` 满足它 |
 | **CentOS 7 / Stream 8 源** | 已 EOL，Dockerfile 会按可用性依次尝试阿里云 / 清华 / 华为云 / 官方 vault 镜像 |
 
-> **麒麟**目标使用社区镜像 `hxsoong/kylin`，并锁定多架构 digest；该镜像不是麒麟官方发布。
-> **UOS 20** 目标参考 [boypt/openssh-rpms](https://github.com/boypt/openssh-rpms)，在 EL8 环境构建并
-> 应用 UOS 20 内核 `dup2()` 兼容补丁（`openssh-uos20-kernel-panic-fix.patch`），并非使用 UOS 官方容器镜像。
-
 ---
 
 ## 🏗 架构概览
@@ -318,7 +314,6 @@ openssh-rpms/
 ├── build_openssh.sh             # ★ 容器内主构建脚本：探测 → 生成 SPEC → rpmbuild → 打包
 ├── install.sh                   # ★ 产物内的一键安装脚本（目标机执行）
 ├── Dockerfile                   # 多发行版通用编译镜像（dnf/yum/microdnf/zypper 自适应）
-├── openssh-uos20-kernel-panic-fix.patch   # UOS 20 内核 dup2() 兼容补丁
 ├── .github/
 │   └── workflows/
 │       ├── build-openssh.yml    # 主 CI：版本解析 → 签名校验 → 矩阵构建 → 发布 Release
