@@ -19,10 +19,9 @@ on:
 env:
   SSH_VERSION: "10.6p2"
   SSL_VERSION: "3.5.9"
-
-# OpenSSH 官方发布签名指纹白名单（上游轮换密钥时需人工核验后更新）。
-# 10.6p2 由 7168B983815A5EEF59A4ADFD2A3F414E736060BA 签名。
-OPENSSH_SIGNER_ALLOWLIST: "7168B983815A5EEF59A4ADFD2A3F414E736060BA"
+  # OpenSSH 官方发布签名指纹白名单（上游轮换密钥时需人工核验后更新）。
+  # 10.6p2 由 7168B983815A5EEF59A4ADFD2A3F414E736060BA 签名。
+  OPENSSH_SIGNER_ALLOWLIST: "7168B983815A5EEF59A4ADFD2A3F414E736060BA"
 
 jobs:
   resolve:
@@ -88,7 +87,6 @@ jobs:
       SSH_VERSION: ${{ needs.resolve.outputs.ssh_version }}
       SSL_VERSION: ${{ needs.resolve.outputs.ssl_version }}
       GH_TOKEN: ${{ github.token }}
-      OPENSSH_SIGNER_ALLOWLIST: ${{ env.OPENSSH_SIGNER_ALLOWLIST }}
     steps:
       - name: Download and verify
         run: |
