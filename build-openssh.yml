@@ -17,8 +17,12 @@ on:
 
 # 修改这里的版本号并推送，即会构建全部目标并发布一个 Release。
 env:
-  SSH_VERSION: "10.6p1"
+  SSH_VERSION: "10.6p2"
   SSL_VERSION: "3.5.9"
+
+# OpenSSH 官方发布签名指纹白名单（上游轮换密钥时需人工核验后更新）。
+# 10.6p2 由 7168B983815A5EEF59A4ADFD2A3F414E736060BA 签名。
+OPENSSH_SIGNER_ALLOWLIST: "7168B983815A5EEF59A4ADFD2A3F414E736060BA"
 
 jobs:
   resolve:
@@ -84,6 +88,7 @@ jobs:
       SSH_VERSION: ${{ needs.resolve.outputs.ssh_version }}
       SSL_VERSION: ${{ needs.resolve.outputs.ssl_version }}
       GH_TOKEN: ${{ github.token }}
+      OPENSSH_SIGNER_ALLOWLIST: ${{ env.OPENSSH_SIGNER_ALLOWLIST }}
     steps:
       - name: Download and verify
         run: |
@@ -101,8 +106,9 @@ jobs:
           gpg --batch --import openssh-release-key.asc >/dev/null 2>&1
           SIGNER="$(gpg --batch --status-fd 1 --verify "openssh-${SSH_VERSION}.tar.gz.asc" "openssh-${SSH_VERSION}.tar.gz" 2>/dev/null \
             | awk '$2 == "VALIDSIG" { print $3 }')"
-          case "$SIGNER" in
-            7168B983815A5EEF59A4ADFD2A3F414E736060BA) ;;
+          ALLOWED=" $(echo "$OPENSSH_SIGNER_ALLOWLIST" | tr ' ' ',') "
+          case "$ALLOWED" in
+            *" $SIGNER "*) ;;
             *) echo "OpenSSH 签名者不在可信白名单: $SIGNER"; exit 1 ;;
           esac
           echo "OpenSSH 签名者: $SIGNER"
@@ -113,7 +119,7 @@ jobs:
           OPENSSL_SHA256="$("${CURL[@]}" \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "X-GitHub-Api-Version: 2022-11-11" \
             "https://api.github.com/repos/openssl/openssl/releases/tags/openssl-${SSL_VERSION}" \
             | jq -r --arg name "openssl-${SSL_VERSION}.tar.gz" '.assets[] | select(.name == $name) | .digest' \
             | sed 's/^sha256://')"
@@ -131,199 +137,84 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  plan:
+    name: Plan build matrix
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+      expected: ${{ steps.gen.outputs.expected }}
+    steps:
+      - name: Generate matrix
+        id: gen
+        run: |
+          set -euo pipefail
+          # 目标定义：<target> <image> <os_tag> <uos20>
+          # 空白字符分隔；image 可为镜像名或 sha256 digest 固定版本。
+          cat > /tmp/targets.txt <<'EOF'
+          centos7 centos:7 el7 0
+          centos-stream8 quay.io/centos/centos:stream8 el8 0
+          centos-stream9 quay.io/centos/centos:stream9 el9 0
+          centos-stream10 quay.io/centos/centos:stream10 el10 0
+          rockylinux8 rockylinux/rockylinux:8 el8 0
+          rockylinux9 rockylinux/rockylinux:9 el9 0
+          rockylinux10 rockylinux/rockylinux:10 el10 0
+          almalinux8 almalinux:8 el8 0
+          almalinux9 almalinux:9 el9 0
+          almalinux10 almalinux:10 el10 0
+          oraclelinux8 oraclelinux:8 el8 0
+          oraclelinux9 oraclelinux:9 el9 0
+          openeuler-22.03-lts openeuler/openeuler:22.03-lts oe2203 0
+          openeuler-24.03-lts-sp1 openeuler/openeuler:24.03-lts-sp1 oe2403sp1 0
+          openeuler-24.03-lts-sp2 openeuler/openeuler:24.03-lts-sp2 oe2403sp2 0
+          openeuler-24.03-lts-sp3 openeuler/openeuler:24.03-lts-sp3 oe2403sp3 0
+          openeuler-24.03-lts-sp4 openeuler/openeuler:24.03-lts-sp4 oe2403sp4 0
+          opencloudos9 opencloudos/opencloudos:9 oc9 0
+          anolis8 openanolis/anolis:8 an8 0
+          amazonlinux2023 amazonlinux:2023 amzn2023 0
+          sle15 registry.suse.com/suse/sle15:15.6 sle15 0
+          kylin-v10-sp1 hxsoong/kylin@sha256:93ba61a4785720106a5d02306042c06f4465bfcd5f577246b0a4b8d5a699d697 ky10sp1 0
+          kylin-v10-sp2 hxsoong/kylin@sha256:a22d6cb8b9e407e8cbcaf1c20517b9807d79ec5015ecb59ca492fb84fe298ed5 ky10sp2 0
+          kylin-v10-sp3 hxsoong/kylin@sha256:b49a72ecf3213e00c5316935a51594c11d43fbccb13ad0cecf939f0f1c1101a3 ky10sp3 0
+          uos20 quay.io/centos/centos:stream8 uos20 1
+          EOF
+          {
+            printf '{"include":['
+            first=1
+            count=0
+            while read -r name image tag uos; do
+              [ -n "${name:-}" ] || continue
+              case "$name" in \#*) continue ;; esac
+              for arch in x86_64 aarch64; do
+                if [ "$arch" = "x86_64" ]; then
+                  platform=linux/amd64; runner=ubuntu-latest
+                else
+                  platform=linux/arm64; runner=ubuntu-24.04-arm
+                fi
+                [ "$first" -eq 1 ] || printf ','
+                first=0
+                count=$((count + 1))
+                printf '{"target":"%s","arch":"%s","platform":"%s","runner":"%s","image":"%s","os_tag":"%s","uos20":"%s"}' \
+                  "$name" "$arch" "$platform" "$runner" "$image" "$tag" "$uos"
+              done
+            done < /tmp/targets.txt
+            printf ']}\n'
+          } > /tmp/matrix.json
+          echo "matrix=$(cat /tmp/matrix.json)" >> "$GITHUB_OUTPUT"
+          echo "expected=$count" >> "$GITHUB_OUTPUT"
+          echo "目标数: $count"
+
   build:
     name: ${{ matrix.target }} / ${{ matrix.arch }}
-    needs: [resolve, sources]
+    needs: [resolve, sources, plan]
+    if: needs.resolve.outputs.should_build == 'true'
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - target: centos7
-            arch: x86_64
-            platform: linux/amd64
-            runner: ubuntu-latest
-            image: "centos:7"
-            os_tag: el7
-            uos20: "0"
-          - target: centos7
-            arch: aarch64
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            image: "centos:7"
-            os_tag: el7
-            uos20: "0"
-          - target: centos-stream8
-            arch: x86_64
-            platform: linux/amd64
-            runner: ubuntu-latest
-            image: "quay.io/centos/centos:stream8"
-            os_tag: el8
-            uos20: "0"
-          - target: centos-stream8
-            arch: aarch64
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            image: "quay.io/centos/centos:stream8"
-            os_tag: el8
-            uos20: "0"
-          - target: centos-stream9
-            arch: x86_64
-            platform: linux/amd64
-            runner: ubuntu-latest
-            image: "quay.io/centos/centos:stream9"
-            os_tag: el9
-            uos20: "0"
-          - target: centos-stream9
-            arch: aarch64
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            image: "quay.io/centos/centos:stream9"
-            os_tag: el9
-            uos20: "0"
-          - target: rockylinux8
-            arch: x86_64
-            platform: linux/amd64
-            runner: ubuntu-latest
-            image: "rockylinux/rockylinux:8"
-            os_tag: el8
-            uos20: "0"
-          - target: rockylinux8
-            arch: aarch64
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            image: "rockylinux/rockylinux:8"
-            os_tag: el8
-            uos20: "0"
-          - target: rockylinux9
-            arch: x86_64
-            platform: linux/amd64
-            runner: ubuntu-latest
-            image: "rockylinux/rockylinux:9"
-            os_tag: el9
-            uos20: "0"
-          - target: rockylinux9
-            arch: aarch64
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            image: "rockylinux/rockylinux:9"
-            os_tag: el9
-            uos20: "0"
-          - target: rockylinux10
-            arch: x86_64
-            platform: linux/amd64
-            runner: ubuntu-latest
-            image: "rockylinux/rockylinux:10"
-            os_tag: el10
-            uos20: "0"
-          - target: rockylinux10
-            arch: aarch64
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            image: "rockylinux/rockylinux:10"
-            os_tag: el10
-            uos20: "0"
-          - target: openeuler-24.03-sp2
-            arch: x86_64
-            platform: linux/amd64
-            runner: ubuntu-latest
-            image: "openeuler/openeuler:24.03-lts-sp2"
-            os_tag: oe2403sp2
-            uos20: "0"
-          - target: openeuler-24.03-sp2
-            arch: aarch64
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            image: "openeuler/openeuler:24.03-lts-sp2"
-            os_tag: oe2403sp2
-            uos20: "0"
-          - target: openeuler-24.03-sp3
-            arch: x86_64
-            platform: linux/amd64
-            runner: ubuntu-latest
-            image: "openeuler/openeuler:24.03-lts-sp3"
-            os_tag: oe2403sp3
-            uos20: "0"
-          - target: openeuler-24.03-sp3
-            arch: aarch64
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            image: "openeuler/openeuler:24.03-lts-sp3"
-            os_tag: oe2403sp3
-            uos20: "0"
-          - target: openeuler-24.03-sp4
-            arch: x86_64
-            platform: linux/amd64
-            runner: ubuntu-latest
-            image: "openeuler/openeuler:24.03-lts-sp4"
-            os_tag: oe2403sp4
-            uos20: "0"
-          - target: openeuler-24.03-sp4
-            arch: aarch64
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            image: "openeuler/openeuler:24.03-lts-sp4"
-            os_tag: oe2403sp4
-            uos20: "0"
-          - target: kylin-v10-sp1
-            arch: x86_64
-            platform: linux/amd64
-            runner: ubuntu-latest
-            image: "hxsoong/kylin@sha256:93ba61a4785720106a5d02306042c06f4465bfcd5f577246b0a4b8d5a699d697"
-            os_tag: ky10sp1
-            uos20: "0"
-          - target: kylin-v10-sp1
-            arch: aarch64
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            image: "hxsoong/kylin@sha256:93ba61a4785720106a5d02306042c06f4465bfcd5f577246b0a4b8d5a699d697"
-            os_tag: ky10sp1
-            uos20: "0"
-          - target: kylin-v10-sp2
-            arch: x86_64
-            platform: linux/amd64
-            runner: ubuntu-latest
-            image: "hxsoong/kylin@sha256:a22d6cb8b9e407e8cbcaf1c20517b9807d79ec5015ecb59ca492fb84fe298ed5"
-            os_tag: ky10sp2
-            uos20: "0"
-          - target: kylin-v10-sp2
-            arch: aarch64
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            image: "hxsoong/kylin@sha256:a22d6cb8b9e407e8cbcaf1c20517b9807d79ec5015ecb59ca492fb84fe298ed5"
-            os_tag: ky10sp2
-            uos20: "0"
-          - target: kylin-v10-sp3
-            arch: x86_64
-            platform: linux/amd64
-            runner: ubuntu-latest
-            image: "hxsoong/kylin@sha256:b49a72ecf3213e00c5316935a51594c11d43fbccb13ad0cecf939f0f1c1101a3"
-            os_tag: ky10sp3
-            uos20: "0"
-          - target: kylin-v10-sp3
-            arch: aarch64
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            image: "hxsoong/kylin@sha256:b49a72ecf3213e00c5316935a51594c11d43fbccb13ad0cecf939f0f1c1101a3"
-            os_tag: ky10sp3
-            uos20: "0"
-          - target: uos20
-            arch: x86_64
-            platform: linux/amd64
-            runner: ubuntu-latest
-            image: "quay.io/centos/centos:stream8"
-            os_tag: uos20
-            uos20: "1"
-          - target: uos20
-            arch: aarch64
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            image: "quay.io/centos/centos:stream8"
-            os_tag: uos20
-            uos20: "1"
-
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     env:
       SSH_VERSION: ${{ needs.resolve.outputs.ssh_version }}
       SSL_VERSION: ${{ needs.resolve.outputs.ssl_version }}
@@ -333,7 +224,6 @@ jobs:
       BASE_IMAGE: ${{ matrix.image }}
       FORCE_OS_TAG: ${{ matrix.os_tag }}
       UOS20: ${{ matrix.uos20 }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -363,10 +253,11 @@ jobs:
           docker run --rm --platform "$TARGET_PLATFORM" \
             -e FORCE_OS_TAG="$FORCE_OS_TAG" \
             -e UOS20="$UOS20" \
+            -e AUTO_DEPS=0 \
             -v "$GITHUB_WORKSPACE:/build" \
             -v "$GITHUB_WORKSPACE/output:/opt" \
             "openssh-builder:${TARGET_ID}-${TARGET_ARCH}" \
-            bash -c "cd /build && printf '2\\n' | bash build_openssh.sh"
+            bash -c "cd /build && bash build_openssh.sh"
 
       - name: Collect artifact
         run: |
@@ -388,7 +279,7 @@ jobs:
 
   release:
     name: Publish Release
-    needs: [resolve, build]
+    needs: [resolve, build, plan]
     if: needs.resolve.outputs.should_build == 'true' && needs.build.result == 'success'
     runs-on: ubuntu-latest
     permissions:
@@ -407,7 +298,10 @@ jobs:
       - name: Prepare Release
         run: |
           set -e
-          test "$(find release-assets -maxdepth 1 -name '*.tar.gz' | wc -l)" -eq 26
+          expected="${{ needs.plan.outputs.expected }}"
+          actual="$(find release-assets -maxdepth 1 -name '*.tar.gz' | wc -l)"
+          echo "产物数量: ${actual}（期望 ${expected}）"
+          test "$actual" -eq "$expected"
           ls -lh release-assets/
 
       - name: Create Release
