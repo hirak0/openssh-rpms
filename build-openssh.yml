@@ -19,10 +19,9 @@ on:
 env:
   SSH_VERSION: "10.6p2"
   SSL_VERSION: "3.5.9"
-
-# OpenSSH 官方发布签名指纹白名单（上游轮换密钥时需人工核验后更新）。
-# 10.6p2 由 7168B983815A5EEF59A4ADFD2A3F414E736060BA 签名。
-OPENSSH_SIGNER_ALLOWLIST: "7168B983815A5EEF59A4ADFD2A3F414E736060BA"
+  # OpenSSH 官方发布签名指纹白名单（上游轮换密钥时需人工核验后更新）。
+  # 10.6p2 由 7168B983815A5EEF59A4ADFD2A3F414E736060BA 签名。
+  OPENSSH_SIGNER_ALLOWLIST: "7168B983815A5EEF59A4ADFD2A3F414E736060BA"
 
 jobs:
   resolve:
@@ -72,10 +71,12 @@ jobs:
           fi
 
           echo "OpenSSH=$SSH OpenSSL-LTS=$SSL release=$RELEASE_TAG build=$SHOULD_BUILD"
-          echo "ssh_version=$SSH" >> "$GITHUB_OUTPUT"
-          echo "ssl_version=$SSL" >> "$GITHUB_OUTPUT"
-          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
-          echo "should_build=$SHOULD_BUILD" >> "$GITHUB_OUTPUT"
+          {
+            echo "ssh_version=$SSH"
+            echo "ssl_version=$SSL"
+            echo "release_tag=$RELEASE_TAG"
+            echo "should_build=$SHOULD_BUILD"
+          } >> "$GITHUB_OUTPUT"
 
   sources:
     name: Download and verify sources
@@ -88,7 +89,6 @@ jobs:
       SSH_VERSION: ${{ needs.resolve.outputs.ssh_version }}
       SSL_VERSION: ${{ needs.resolve.outputs.ssl_version }}
       GH_TOKEN: ${{ github.token }}
-      OPENSSH_SIGNER_ALLOWLIST: ${{ env.OPENSSH_SIGNER_ALLOWLIST }}
     steps:
       - name: Download and verify
         run: |
@@ -102,11 +102,13 @@ jobs:
             "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-${SSH_VERSION}.tar.gz.asc"
           "${CURL[@]}" -o openssh-release-key.asc \
             "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/RELEASE_KEY.asc"
-          export GNUPGHOME="$(mktemp -d)"
+          GNUPGHOME="$(mktemp -d)"
+          export GNUPGHOME
           gpg --batch --import openssh-release-key.asc >/dev/null 2>&1
           SIGNER="$(gpg --batch --status-fd 1 --verify "openssh-${SSH_VERSION}.tar.gz.asc" "openssh-${SSH_VERSION}.tar.gz" 2>/dev/null \
             | awk '$2 == "VALIDSIG" { print $3 }')"
-          ALLOWED=" $(echo "$OPENSSH_SIGNER_ALLOWLIST" | tr ' ' ',') "
+          # 白名单可用空格或逗号分隔多个指纹
+          ALLOWED=" $(echo "$OPENSSH_SIGNER_ALLOWLIST" | tr ',' ' ') "
           case "$ALLOWED" in
             *" $SIGNER "*) ;;
             *) echo "OpenSSH 签名者不在可信白名单: $SIGNER"; exit 1 ;;
