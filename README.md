@@ -2,7 +2,7 @@
 
 [![license](https://img.shields.io/badge/license-BSD--2--Clause-green?style=flat)](https://github.com/openssh/openssh-portable/blob/master/LICENSE)
 [![version](https://img.shields.io/badge/version-10.6p2-green?style=flat)](https://www.openssh.com/txt/release-10.6)
-[![build](https://github.com/hirak0/openssh-rpms/actions/workflows/build-openssh.yml/badge.svg)](https://github.com/openssh-rpms-by-hirak0/openssh-rpms/actions/workflows/build-openssh.yml)
+[![build](https://github.com/hirak0/openssh-rpms/actions/workflows/build-openssh.yml/badge.svg)](https://github.com/hirak0/openssh-rpms/actions/workflows/build-openssh.yml)
 [![docker](https://img.shields.io/badge/docker-24+-blue?style=flat)](https://docs.docker.com/get-docker/)
 [![openssl](https://img.shields.io/badge/OpenSSL-3.5%20LTS-lightgrey?style=flat)](https://www.openssl.org/source/)
 
