@@ -1,318 +1,98 @@
-name: Build OpenSSH RPM Matrix
+name: Docker
+
+# This workflow uses actions that are not certified by GitHub.
+# They are provided by a third-party and are governed by
+# separate terms of service, privacy policy, and support
+# documentation.
 
 on:
   schedule:
-    # 每天北京时间 10:00 检查上游稳定版。
-    - cron: "0 2 * * *"
-  workflow_dispatch:
+    - cron: '42 16 * * *'
   push:
-    paths:
-      - "openssh-*.tar.gz"
-      - "openssl-*.tar.gz"
-      - "Dockerfile"
-      - "build_openssh.sh"
-      - "install.sh"
-      - "openssh-uos20-kernel-panic-fix.patch"
-      - ".github/workflows/build-openssh.yml"
+    branches: [ "main" ]
+    # Publish semver tags as releases.
+    tags: [ 'v*.*.*' ]
+  pull_request:
+    branches: [ "main" ]
 
-# 修改这里的版本号并推送，即会构建全部目标并发布一个 Release。
 env:
-  SSH_VERSION: "10.6p2"
-  SSL_VERSION: "3.5.9"
-  # OpenSSH 官方发布签名指纹白名单（上游轮换密钥时需人工核验后更新）。
-  # 10.6p2 由 7168B983815A5EEF59A4ADFD2A3F414E736060BA 签名。
-  OPENSSH_SIGNER_ALLOWLIST: "7168B983815A5EEF59A4ADFD2A3F414E736060BA"
+  # Use docker.io for Docker Hub if empty
+  REGISTRY: ghcr.io
+  # github.repository as <account>/<repo>
+  IMAGE_NAME: ${{ github.repository }}
+
 
 jobs:
-  resolve:
-    name: Resolve versions
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    outputs:
-      ssh_version: ${{ steps.versions.outputs.ssh_version }}
-      ssl_version: ${{ steps.versions.outputs.ssl_version }}
-      release_tag: ${{ steps.versions.outputs.release_tag }}
-      should_build: ${{ steps.versions.outputs.should_build }}
-    steps:
-      - name: Resolve upstream versions
-        id: versions
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          CURL=(curl --retry 3 --retry-all-errors --connect-timeout 15 --max-time 120 -fsSL)
-          if [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
-            SSH="$("${CURL[@]}" https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/ \
-              | grep -oE 'openssh-[0-9]+\.[0-9]+p[0-9]+\.tar\.gz' \
-              | sed -E 's/^openssh-//;s/\.tar\.gz$//' | sort -Vu | tail -1)"
-            SSL="$("${CURL[@]}" https://openssl-library.org/source/ \
-              | perl -0ne 'while (/<tr>\s*<td>[^<]*\[LTS\]<\/td>.*?openssl-([0-9]+\.[0-9]+\.[0-9]+)\.tar\.gz/sg) { print "$1\n" }' \
-              | sort -Vu | tail -1)"
-          else
-            SSH="$SSH_VERSION"
-            SSL="$SSL_VERSION"
-          fi
-          [ -n "$SSH" ] && [ -n "$SSL" ] || { echo "未检测到有效版本"; exit 1; }
-
-          RELEASE_TAG="openssh-${SSH}-openssl-${SSL}"
-          SHOULD_BUILD=true
-          if [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
-            STATUS="$(curl --retry 3 --retry-all-errors --connect-timeout 15 --max-time 60 -sS \
-              -o /dev/null -w '%{http_code}' \
-              -H "Authorization: Bearer $GH_TOKEN" \
-              -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}")"
-            case "$STATUS" in
-              200) SHOULD_BUILD=false ;;
-              404) ;;
-              *) echo "检查 Release 失败，HTTP $STATUS"; exit 1 ;;
-            esac
-          fi
-
-          echo "OpenSSH=$SSH OpenSSL-LTS=$SSL release=$RELEASE_TAG build=$SHOULD_BUILD"
-          {
-            echo "ssh_version=$SSH"
-            echo "ssl_version=$SSL"
-            echo "release_tag=$RELEASE_TAG"
-            echo "should_build=$SHOULD_BUILD"
-          } >> "$GITHUB_OUTPUT"
-
-  sources:
-    name: Download and verify sources
-    needs: resolve
-    if: needs.resolve.outputs.should_build == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    env:
-      SSH_VERSION: ${{ needs.resolve.outputs.ssh_version }}
-      SSL_VERSION: ${{ needs.resolve.outputs.ssl_version }}
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - name: Download and verify
-        run: |
-          set -e
-          CURL=(curl --retry 3 --retry-all-errors --connect-timeout 15 --max-time 300 -fsSL)
-          "${CURL[@]}" -o "openssh-${SSH_VERSION}.tar.gz" \
-            "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-${SSH_VERSION}.tar.gz" \
-            || "${CURL[@]}" -o "openssh-${SSH_VERSION}.tar.gz" \
-              "https://mirrors.tuna.tsinghua.edu.cn/OpenBSD/OpenSSH/portable/openssh-${SSH_VERSION}.tar.gz"
-          "${CURL[@]}" -o "openssh-${SSH_VERSION}.tar.gz.asc" \
-            "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-${SSH_VERSION}.tar.gz.asc"
-          "${CURL[@]}" -o openssh-release-key.asc \
-            "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/RELEASE_KEY.asc"
-          GNUPGHOME="$(mktemp -d)"
-          export GNUPGHOME
-          gpg --batch --import openssh-release-key.asc >/dev/null 2>&1
-          SIGNER="$(gpg --batch --status-fd 1 --verify "openssh-${SSH_VERSION}.tar.gz.asc" "openssh-${SSH_VERSION}.tar.gz" 2>/dev/null \
-            | awk '$2 == "VALIDSIG" { print $3 }')"
-          # 白名单可用空格或逗号分隔多个指纹
-          ALLOWED=" $(echo "$OPENSSH_SIGNER_ALLOWLIST" | tr ',' ' ') "
-          case "$ALLOWED" in
-            *" $SIGNER "*) ;;
-            *) echo "OpenSSH 签名者不在可信白名单: $SIGNER"; exit 1 ;;
-          esac
-          echo "OpenSSH 签名者: $SIGNER"
-          "${CURL[@]}" -o "openssl-${SSL_VERSION}.tar.gz" \
-            "https://github.com/openssl/openssl/releases/download/openssl-${SSL_VERSION}/openssl-${SSL_VERSION}.tar.gz" \
-            || "${CURL[@]}" -o "openssl-${SSL_VERSION}.tar.gz" \
-              "https://mirrors.tuna.tsinghua.edu.cn/openssl/source/openssl-${SSL_VERSION}.tar.gz"
-          OPENSSL_SHA256="$("${CURL[@]}" \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-11" \
-            "https://api.github.com/repos/openssl/openssl/releases/tags/openssl-${SSL_VERSION}" \
-            | jq -r --arg name "openssl-${SSL_VERSION}.tar.gz" '.assets[] | select(.name == $name) | .digest' \
-            | sed 's/^sha256://')"
-          [ -n "$OPENSSL_SHA256" ] && [ "$OPENSSL_SHA256" != "null" ] \
-            || { echo "未找到 OpenSSL 官方 SHA256"; exit 1; }
-          printf '%s  %s\n' "$OPENSSL_SHA256" "openssl-${SSL_VERSION}.tar.gz" | sha256sum -c -
-
-      - name: Upload verified sources
-        uses: actions/upload-artifact@v4
-        with:
-          name: verified-sources
-          path: |
-            openssh-${{ env.SSH_VERSION }}.tar.gz
-            openssl-${{ env.SSL_VERSION }}.tar.gz
-          if-no-files-found: error
-          retention-days: 1
-
-  plan:
-    name: Plan build matrix
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    outputs:
-      matrix: ${{ steps.gen.outputs.matrix }}
-      expected: ${{ steps.gen.outputs.expected }}
-    steps:
-      - name: Generate matrix
-        id: gen
-        run: |
-          set -euo pipefail
-          # 目标定义：<target> <image> <os_tag> <uos20>
-          # 空白字符分隔；image 可为镜像名或 sha256 digest 固定版本。
-          cat > /tmp/targets.txt <<'EOF'
-          centos7 centos:7 el7 0
-          centos-stream8 quay.io/centos/centos:stream8 el8 0
-          centos-stream9 quay.io/centos/centos:stream9 el9 0
-          centos-stream10 quay.io/centos/centos:stream10 el10 0
-          rockylinux8 rockylinux/rockylinux:8 el8 0
-          rockylinux9 rockylinux/rockylinux:9 el9 0
-          rockylinux10 rockylinux/rockylinux:10 el10 0
-          almalinux8 almalinux:8 el8 0
-          almalinux9 almalinux:9 el9 0
-          almalinux10 almalinux:10 el10 0
-          oraclelinux8 oraclelinux:8 el8 0
-          oraclelinux9 oraclelinux:9 el9 0
-          openeuler-22.03-lts openeuler/openeuler:22.03-lts oe2203 0
-          openeuler-24.03-lts-sp1 openeuler/openeuler:24.03-lts-sp1 oe2403sp1 0
-          openeuler-24.03-lts-sp2 openeuler/openeuler:24.03-lts-sp2 oe2403sp2 0
-          openeuler-24.03-lts-sp3 openeuler/openeuler:24.03-lts-sp3 oe2403sp3 0
-          openeuler-24.03-lts-sp4 openeuler/openeuler:24.03-lts-sp4 oe2403sp4 0
-          opencloudos9 opencloudos/opencloudos:9 oc9 0
-          anolis8 openanolis/anolis:8 an8 0
-          amazonlinux2023 amazonlinux:2023 amzn2023 0
-          sle15 registry.suse.com/suse/sle15:15.6 sle15 0
-          kylin-v10-sp1 hxsoong/kylin@sha256:93ba61a4785720106a5d02306042c06f4465bfcd5f577246b0a4b8d5a699d697 ky10sp1 0
-          kylin-v10-sp2 hxsoong/kylin@sha256:a22d6cb8b9e407e8cbcaf1c20517b9807d79ec5015ecb59ca492fb84fe298ed5 ky10sp2 0
-          kylin-v10-sp3 hxsoong/kylin@sha256:b49a72ecf3213e00c5316935a51594c11d43fbccb13ad0cecf939f0f1c1101a3 ky10sp3 0
-          uos20 quay.io/centos/centos:stream8 uos20 1
-          EOF
-          {
-            printf '{"include":['
-            first=1
-            count=0
-            while read -r name image tag uos; do
-              [ -n "${name:-}" ] || continue
-              case "$name" in \#*) continue ;; esac
-              for arch in x86_64 aarch64; do
-                if [ "$arch" = "x86_64" ]; then
-                  platform=linux/amd64; runner=ubuntu-latest
-                else
-                  platform=linux/arm64; runner=ubuntu-24.04-arm
-                fi
-                [ "$first" -eq 1 ] || printf ','
-                first=0
-                count=$((count + 1))
-                printf '{"target":"%s","arch":"%s","platform":"%s","runner":"%s","image":"%s","os_tag":"%s","uos20":"%s"}' \
-                  "$name" "$arch" "$platform" "$runner" "$image" "$tag" "$uos"
-              done
-            done < /tmp/targets.txt
-            printf ']}\n'
-          } > /tmp/matrix.json
-          echo "matrix=$(cat /tmp/matrix.json)" >> "$GITHUB_OUTPUT"
-          echo "expected=$count" >> "$GITHUB_OUTPUT"
-          echo "目标数: $count"
-
   build:
-    name: ${{ matrix.target }} / ${{ matrix.arch }}
-    needs: [resolve, sources, plan]
-    if: needs.resolve.outputs.should_build == 'true'
-    runs-on: ${{ matrix.runner }}
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
-    env:
-      SSH_VERSION: ${{ needs.resolve.outputs.ssh_version }}
-      SSL_VERSION: ${{ needs.resolve.outputs.ssl_version }}
-      TARGET_ID: ${{ matrix.target }}
-      TARGET_ARCH: ${{ matrix.arch }}
-      TARGET_PLATFORM: ${{ matrix.platform }}
-      BASE_IMAGE: ${{ matrix.image }}
-      FORCE_OS_TAG: ${{ matrix.os_tag }}
-      UOS20: ${{ matrix.uos20 }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
 
-      - name: Remove repository source archives
-        run: rm -f openssh-*.tar.gz openssl-*.tar.gz
-
-      - name: Download verified sources
-        uses: actions/download-artifact@v4
-        with:
-          name: verified-sources
-          path: .
-
-      - name: Build builder image
-        run: |
-          set -e
-          docker build --platform "$TARGET_PLATFORM" \
-            --build-arg BASE_IMAGE="$BASE_IMAGE" \
-            -t "openssh-builder:${TARGET_ID}-${TARGET_ARCH}" .
-
-      - name: Build RPMs
-        run: |
-          set -e
-          mkdir -p output
-          docker run --rm --platform "$TARGET_PLATFORM" \
-            -e FORCE_OS_TAG="$FORCE_OS_TAG" \
-            -e UOS20="$UOS20" \
-            -e AUTO_DEPS=0 \
-            -v "$GITHUB_WORKSPACE:/build" \
-            -v "$GITHUB_WORKSPACE/output:/opt" \
-            "openssh-builder:${TARGET_ID}-${TARGET_ARCH}" \
-            bash -c "cd /build && bash build_openssh.sh"
-
-      - name: Collect artifact
-        run: |
-          set -e
-          SOURCE="$(find output -maxdepth 1 -type f -name '*.tar.gz' -print -quit)"
-          [ -n "$SOURCE" ] || { echo "未找到 RPM 压缩包"; exit 1; }
-          tar -tzf "$SOURCE" | grep -q '/install.sh$' \
-            || { echo "RPM 压缩包中缺少 install.sh"; exit 1; }
-          mkdir -p dist
-          cp "$SOURCE" "dist/openssh-${SSH_VERSION}-rpms-${TARGET_ID}-${TARGET_ARCH}.tar.gz"
-          ls -lh dist/
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: rpms-${{ matrix.target }}-${{ matrix.arch }}
-          path: dist/*.tar.gz
-          if-no-files-found: error
-
-  release:
-    name: Publish Release
-    needs: [resolve, build, plan]
-    if: needs.resolve.outputs.should_build == 'true' && needs.build.result == 'success'
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-    env:
-      SSH_VERSION: ${{ needs.resolve.outputs.ssh_version }}
-      SSL_VERSION: ${{ needs.resolve.outputs.ssl_version }}
+      contents: read
+      packages: write
+      # This is used to complete the identity challenge
+      # with sigstore/fulcio when running outside of PRs.
+      id-token: write
+
     steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: rpms-*
-          path: release-assets
-          merge-multiple: true
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Prepare Release
-        run: |
-          set -e
-          expected="${{ needs.plan.outputs.expected }}"
-          actual="$(find release-assets -maxdepth 1 -name '*.tar.gz' | wc -l)"
-          echo "产物数量: ${actual}（期望 ${expected}）"
-          test "$actual" -eq "$expected"
-          ls -lh release-assets/
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
+      # Install the cosign tool except on PR
+      # https://github.com/sigstore/cosign-installer
+      - name: Install cosign
+        if: github.event_name != 'pull_request'
+        uses: sigstore/cosign-installer@59acb6260d9c0ba8f4a2f9d9b48431a222b68e20 #v3.5.0
         with:
-          tag_name: ${{ needs.resolve.outputs.release_tag }}
-          name: OpenSSH ${{ env.SSH_VERSION }} + OpenSSL ${{ env.SSL_VERSION }} RPMs
-          target_commitish: ${{ github.sha }}
-          files: release-assets/*.tar.gz
-          fail_on_unmatched_files: true
-          overwrite_files: true
-          generate_release_notes: true
+          cosign-release: 'v2.2.4'
+
+      # Set up BuildKit Docker container builder to be able to build
+      # multi-platform images and export cache
+      # https://github.com/docker/setup-buildx-action
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f95db51fddba0c2d1ec667646a06c2ce06100226 # v3.0.0
+
+      # Login against a Docker registry except on PR
+      # https://github.com/docker/login-action
+      - name: Log into registry ${{ env.REGISTRY }}
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@343f7c4344506bcbf9b4de18042ae17996df046d # v3.0.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Extract metadata (tags, labels) for Docker
+      # https://github.com/docker/metadata-action
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@96383f45573cb7f253c731d3b3ab81c87ef81934 # v5.0.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+      # Build and push Docker image with Buildx (don't push on PR)
+      # https://github.com/docker/build-push-action
+      - name: Build and push Docker image
+        id: build-and-push
+        uses: docker/build-push-action@0565240e2d4ab88bba5387d719585280857ece09 # v5.0.0
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Sign the resulting Docker image digest except on PRs.
+      # This will only write to the public Rekor transparency log when the Docker
+      # repository is public to avoid leaking data.  If you would like to publish
+      # transparency data even for private images, pass --force to cosign below.
+      # https://github.com/sigstore/cosign
+      - name: Sign the published Docker image
+        if: ${{ github.event_name != 'pull_request' }}
+        env:
+          # https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#using-an-intermediate-environment-variable
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.build-and-push.outputs.digest }}
+        # This step uses the identity token to provision an ephemeral certificate
+        # against the sigstore community Fulcio instance.
+        run: echo "${TAGS}" | xargs -I {} cosign sign --yes "{}@${DIGEST}"
